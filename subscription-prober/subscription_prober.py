@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-subscription_prober.py — берёт ссылку(и) подписки (base64-список share-линков
-ИЛИ sing-box-style JSON с массивом outbounds), поднимает каждый прокси через
-локальный Xray-core (по одному SOCKS5-инбаунду на прокси в общем процессе),
-и проверяет доступность списка целевых сайтов через каждый прокси.
+subscription_prober.py — берёт ссылку(и) подписки в одном из трёх форматов:
+  - base64/plain-список share-линков (vless://, vmess://, trojan://, ss://);
+  - sing-box JSON ({"outbounds":[{"type": "vless", "server": ...}, ...]});
+  - нативный Xray-core client-config JSON ({"outbounds":[{"protocol": "vless",
+    "settings": {...}, "streamSettings": {...}}, ...]} — именно так выглядят
+    подписки-балансировщики с routing.balancers/routing.rules и любые
+    xhttp/hysteria2-outbound'ы с полным набором полей: такие outbound'ы
+    передаются в итоговый конфиг as-is, без потери padding/xmux/finalmask).
+Поднимает каждый прокси через локальный Xray-core (по одному SOCKS5-инбаунду
+на прокси в общем процессе) и проверяет доступность списка целевых сайтов
+через каждый прокси.
 Результат — матрица proxy x site — уходит на central-server (/ingest-probes)
 и отображается на веб-дашборде.
 
@@ -89,15 +96,24 @@ def parse_subscription(raw_text):
     if not raw_text:
         return []
 
-    # Вариант 1: валидный JSON — sing-box формат {"outbounds":[...]} или просто список outbounds
+    # Вариант 1: валидный JSON — список outbounds. Два разных диалекта:
+    #  - sing-box: {"type": "vless", "server": ..., "server_port": ...}
+    #  - нативный Xray-core client-config (панели/балансировщики отдают именно это):
+    #    {"protocol": "vless", "settings": {...}, "streamSettings": {...}}
+    # Оба могут прийти как {"outbounds": [...]} (в т.ч. с routing.balancers/routing.rules —
+    # эти секции просто игнорируются, нам нужны только сами outbound-объекты) или как голый список.
     try:
         data = json.loads(raw_text)
+        outbounds = None
         if isinstance(data, dict) and "outbounds" in data:
-            return [o for o in data["outbounds"] if isinstance(o, dict)
-                     and o.get("type") in ("vless", "vmess", "trojan", "shadowsocks")]
-        if isinstance(data, list):
-            return [o for o in data if isinstance(o, dict)
-                     and o.get("type") in ("vless", "vmess", "trojan", "shadowsocks")]
+            outbounds = data["outbounds"]
+        elif isinstance(data, list):
+            outbounds = data
+        if outbounds is not None:
+            singbox_types = ("vless", "vmess", "trojan", "shadowsocks")
+            xray_protocols = ("vless", "vmess", "trojan", "shadowsocks", "hysteria", "hysteria2")
+            return [o for o in outbounds if isinstance(o, dict)
+                     and (o.get("type") in singbox_types or o.get("protocol") in xray_protocols)]
     except json.JSONDecodeError:
         pass
 
@@ -157,6 +173,7 @@ def parse_share_link(uri):
                 "flow": q.get("flow", ""),
                 "ws_path": q.get("path", "/"), "ws_host": q.get("host", ""),
                 "grpc_service": q.get("serviceName", ""),
+                "xhttp_mode": q.get("mode", "auto"),
                 "alpn": q.get("alpn", ""),
             }
 
@@ -232,7 +249,39 @@ def parse_singbox_outbound(obj):
         return None
 
 
+def parse_xray_outbound(obj):
+    """Нативный Xray-core client outbound — {"protocol": "...", "settings": {...},
+    "streamSettings": {...}}. Такое отдают панели, экспортирующие полный конфиг
+    (роутеры/балансировщики с routing.balancers, xhttp с полным набором padding/xmux,
+    hysteria2 и т.д.) — вместо share-линков или sing-box JSON.
+
+    В отличие от parse_share_link/parse_singbox_outbound мы НЕ разбираем поля обратно
+    в общий ProxyDef (это создавало бы риск потерять специфичные для транспорта поля
+    вроде xhttpSettings.extra или streamSettings.hysteriaSettings/finalmask) — settings и
+    streamSettings передаются в итоговый Xray-конфиг as-is, меняется только tag."""
+    try:
+        proto = obj.get("protocol")
+        if proto not in ("vless", "vmess", "trojan", "shadowsocks", "hysteria", "hysteria2"):
+            return None  # freedom/blackhole/dns/api и т.п. — не прокси, пропускаем
+        settings = obj.get("settings")
+        if not isinstance(settings, dict):
+            return None
+        remark = obj.get("tag") or proto
+        return {"remark": remark, "_raw_outbound": {
+            "protocol": proto,
+            "settings": settings,
+            "streamSettings": obj.get("streamSettings") or {},
+        }}
+    except Exception as e:
+        log(f"parse_xray_outbound fail: {e}")
+        return None
+
+
 def build_xray_outbound(tag, pd):
+    if "_raw_outbound" in pd:
+        outbound = dict(pd["_raw_outbound"])
+        outbound["tag"] = tag
+        return outbound
     network = {
         "tcp": "raw", "raw": "raw", "ws": "websocket", "websocket": "websocket",
         "grpc": "grpc", "h2": "http", "http": "http", "httpupgrade": "httpupgrade",
@@ -262,6 +311,11 @@ def build_xray_outbound(tag, pd):
         stream["wsSettings"] = ws
     elif network == "grpc":
         stream["grpcSettings"] = {"serviceName": pd.get("grpc_service", "")}
+    elif network == "xhttp":
+        xh = {"mode": pd.get("xhttp_mode") or "auto", "path": pd.get("ws_path") or "/"}
+        if pd.get("ws_host"):
+            xh["host"] = pd["ws_host"]
+        stream["xhttpSettings"] = xh
 
     proto = pd["protocol"]
     if proto == "vless":
@@ -350,7 +404,12 @@ def run_probe_cycle():
             log(f"не удалось получить подписку {sub_url}: {e}")
             continue
         for entry in parse_subscription(raw):
-            pd = parse_singbox_outbound(entry) if isinstance(entry, dict) else parse_share_link(entry)
+            if isinstance(entry, dict):
+                # "protocol" — нативный Xray-core outbound (панели/балансировщики),
+                # "type" — sing-box outbound. Форматы разные, поля не пересекаются.
+                pd = parse_xray_outbound(entry) if "protocol" in entry else parse_singbox_outbound(entry)
+            else:
+                pd = parse_share_link(entry)
             if pd:
                 all_proxies.append(pd)
 
@@ -373,10 +432,12 @@ def run_probe_cycle():
     results = []
     try:
         proc = subprocess.Popen([XRAY_BIN, "run", "-c", cfg_path],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         time.sleep(XRAY_STARTUP_WAIT)
         if proc.poll() is not None:
-            log(f"xray завершился сразу после старта (код {proc.returncode}) — проверьте конфиг/бинарник")
+            out = proc.stdout.read() if proc.stdout else ""
+            log(f"xray завершился сразу после старта (код {proc.returncode}) — проверьте конфиг/бинарник. "
+                f"Вывод xray: {out[-2000:]}")
             return None
 
         jobs = [(tag, remark, port, site) for (tag, remark, port) in entries for site in TARGET_SITES]
