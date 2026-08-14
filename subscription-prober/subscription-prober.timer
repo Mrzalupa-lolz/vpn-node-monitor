@@ -1,0 +1,11 @@
+[Unit]
+Description=Run subscription-prober every 5 minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

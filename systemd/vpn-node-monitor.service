@@ -1,0 +1,16 @@
+[Unit]
+Description=VPN node monitor (one-shot metrics collection)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Нужен root/CAP_NET_ADMIN для `wg show dump`, чтения /proc/net/*, systemctl is-active.
+ExecStart=/usr/local/bin/vpn-node-monitor.sh
+Nice=10
+IOSchedulingClass=idle
+ProtectSystem=strict
+ReadWritePaths=/var/lib/node_exporter/textfile_collector /var/log/vpn-node-monitor /var/lib/vpn-node-monitor
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true

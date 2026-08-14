@@ -1,0 +1,11 @@
+[Unit]
+Description=Run vpn-node-monitor every 30 seconds
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

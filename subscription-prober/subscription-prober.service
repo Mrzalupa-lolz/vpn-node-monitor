@@ -1,0 +1,15 @@
+[Unit]
+Description=Subscription prober (one-shot: fetch subscription, probe sites through each proxy)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/subscription-prober/subscription-prober.env
+ExecStart=/usr/bin/python3 /usr/local/bin/subscription_prober.py
+Nice=10
+User=subprober
+Group=subprober
+ReadWritePaths=/var/lib/subscription-prober /var/log/subscription-prober
+NoNewPrivileges=true
+PrivateTmp=true
