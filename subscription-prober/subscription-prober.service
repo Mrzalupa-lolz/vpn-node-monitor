@@ -6,7 +6,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/subscription-prober/subscription-prober.env
-ExecStart=/usr/bin/python3 /usr/local/bin/subscription_prober.py
+ExecStart=/usr/bin/python3 /opt/vpn-node-monitor/subscription-prober/subscription_prober.py
 Nice=10
 User=subprober
 Group=subprober

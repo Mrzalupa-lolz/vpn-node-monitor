@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/vpn-monitor-server/vpn-monitor-server.env
-ExecStart=/usr/bin/python3 /usr/local/bin/vpn-monitor-server.py
+ExecStart=/usr/bin/python3 /opt/vpn-node-monitor/central-server/vpn-monitor-server.py
 Restart=on-failure
 RestartSec=5
 User=vpn-monitor

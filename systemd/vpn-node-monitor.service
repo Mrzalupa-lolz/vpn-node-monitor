@@ -6,7 +6,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 # Нужен root/CAP_NET_ADMIN для `wg show dump`, чтения /proc/net/*, systemctl is-active.
-ExecStart=/usr/local/bin/vpn-node-monitor.sh
+ExecStart=/opt/vpn-node-monitor/vpn-node-monitor.sh
 Nice=10
 IOSchedulingClass=idle
 ProtectSystem=strict
